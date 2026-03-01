@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>三送会 動画生成（画像順番 + 音源同期 + シュール球体 + 書き出し）</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header>
+    <div class="title">
+      <div class="h1">三送会：画像→音源→同期→書き出し</div>
+      <div class="sub">最初60秒は0.9倍、以降1.0倍。曲の長さに合わせて速度を自動計算。</div>
+    </div>
+    <div class="pill" id="statusPill">READY</div>
+  </header>
+
+  <main class="wrap">
+    <section class="card">
+      <div class="hd">1) 画像（順番つき）</div>
+      <div class="bd">
+        <input id="imgInput" type="file" accept="image/*" multiple />
+        <div class="hint">サムネをドラッグして順番を決める。10〜40枚くらいが気持ちいい。</div>
+        <div class="list" id="imgList"></div>
+      </div>
+
+      <div class="hd">2) 音源</div>
+      <div class="bd">
+        <input id="audInput" type="file" accept="audio/*" />
+        <div class="grid2">
+          <div class="field">
+            <label>曲の長さ</label>
+            <div class="read" id="audLen">-</div>
+          </div>
+          <div class="field">
+            <label>ループ数（自動）</label>
+            <select id="loops">
+              <option value="auto" selected>auto（おすすめ）</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+            </select>
+          </div>
+        </div>
+        <div class="hint">autoは「曲が長いほど、同じ写真が何回も出すぎない」ようにループ数を選ぶ。</div>
+      </div>
+
+      <div class="hd">3) 再生 / 書き出し</div>
+      <div class="bd">
+        <div class="row">
+          <button class="btn primary" id="btnPlay">再生</button>
+          <button class="btn" id="btnPause">一時停止</button>
+          <button class="btn" id="btnStop">停止</button>
+          <button class="btn" id="btnFS">フルスクリーン</button>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <button class="btn" id="btnRec">書き出し開始（WebM）</button>
+          <button class="btn danger" id="btnRecStop">書き出し停止</button>
+          <a class="btn" id="dlLink" href="#" download="sanso.webm" style="display:none;">ダウンロード</a>
+        </div>
+
+        <div class="grid2" style="margin-top:10px">
+          <div class="field">
+            <label>画面の流れ（強さ）</label>
+            <input id="flowStrength" type="range" min="0.6" max="1.4" step="0.01" value="1.0">
+          </div>
+          <div class="field">
+            <label>飽き対策（強さ）</label>
+            <input id="spice" type="range" min="0" max="1" step="0.01" value="0.55">
+          </div>
+          <div class="field">
+            <label>画像の見せ方</label>
+            <select id="fitMode">
+              <option value="contain" selected>contain（切れない）</option>
+              <option value="cover">cover（迫力）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>球体（右下）</label>
+            <select id="orbOn">
+              <option value="on" selected>ON</option>
+              <option value="off">OFF</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="hint" style="margin-top:10px">
+          書き出しはブラウザがWebMを生成。学校PCで再生が不安なら、あとでMP4に変換（VLC等）すると事故が減る。
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="hd">プレビュー（Canvas）</div>
+      <div class="bd">
+        <div class="stage" id="stage">
+          <canvas id="cv"></canvas>
+        </div>
+
+        <div class="hud">
+          <div class="badge" id="badge">0.0s</div>
+          <div class="bar"><div id="bar"></div></div>
+          <div class="badge" id="speedBadge">x0.90</div>
+        </div>
+
+        <audio id="audio" controls style="width:100%; margin-top:10px;"></audio>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
