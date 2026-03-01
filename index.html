@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>三送会：画像順番 + 音源同期 + 書き出し（安全版）</title>
+  <title>三送会：自動生成（画像順番＋音源同期）</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <header>
     <div class="title">
-      <div class="h1">三送会：動画生成（安全版）</div>
-      <div class="sub">画像順番 → 音源 → 同期 → プレビュー → WebM書き出し。落ちない設計。</div>
+      <div class="h1">三送会：自動生成（安定版）</div>
+      <div class="sub">画像→音源→「生成開始」→終わったらWebMをダウンロード。最初60秒0.9×、以降1.0×。</div>
     </div>
     <div class="pill" id="statusPill">READY</div>
   </header>
@@ -20,7 +20,7 @@
       <div class="hd">1) 画像（順番つき）</div>
       <div class="bd">
         <input id="imgInput" type="file" accept="image/*" multiple />
-        <div class="hint">サムネをドラッグで順番変更。縁取りなし・一列で流す。</div>
+        <div class="hint">サムネをドラッグで順番変更。縁取りなし・一列で右→左に流れる。</div>
         <div class="list" id="imgList"></div>
       </div>
 
@@ -42,33 +42,26 @@
               <option value="4">4</option>
             </select>
           </div>
-        </div>
-        <div class="hint">最初60秒は0.9倍速、以降1.0倍速。曲の長さから速度を自動計算。</div>
-      </div>
 
-      <div class="hd">3) 再生 / 書き出し</div>
-      <div class="bd">
-        <div class="row">
-          <button class="btn primary" id="btnPlay">再生</button>
-          <button class="btn" id="btnPause">一時停止</button>
-          <button class="btn" id="btnStop">停止</button>
-          <button class="btn" id="btnFS">フルスクリーン</button>
-        </div>
-
-        <div class="row" style="margin-top:10px">
-          <button class="btn" id="btnRec">書き出し開始（WebM）</button>
-          <button class="btn danger" id="btnRecStop">書き出し停止</button>
-          <a class="btn" id="dlLink" href="#" download="sanso.webm" style="display:none;">ダウンロード</a>
-        </div>
-
-        <div class="grid2" style="margin-top:10px">
+          <div class="field">
+            <label>終わり前倒し（秒）</label>
+            <input id="endLead" type="range" min="0" max="6" step="0.1" value="1.6" />
+          </div>
           <div class="field">
             <label>流れの速さ（最終倍率）</label>
             <input id="flowStrength" type="range" min="0.45" max="1.25" step="0.01" value="0.78" />
           </div>
+
           <div class="field">
             <label>飽き対策（強さ）</label>
             <input id="spice" type="range" min="0" max="1" step="0.01" value="0.55" />
+          </div>
+          <div class="field">
+            <label>球体（右下）</label>
+            <select id="orbOn">
+              <option value="on" selected>ON</option>
+              <option value="off">OFF</option>
+            </select>
           </div>
 
           <div class="field">
@@ -79,27 +72,41 @@
             </select>
           </div>
           <div class="field">
-            <label>球体（右下）</label>
-            <select id="orbOn">
-              <option value="on" selected>ON</option>
-              <option value="off">OFF</option>
-            </select>
+            <label>（描画）FPS</label>
+            <div class="read">30fps 固定</div>
           </div>
         </div>
 
+        <div class="hint">前倒し=「曲が終わる少し前に、列がきれいに流れ切る」。おすすめは1.2〜2.0秒。</div>
+      </div>
+
+      <div class="hd">3) 生成（ワンクリック）</div>
+      <div class="bd">
+        <div class="row">
+          <button class="btn primary" id="btnGenerate">生成開始（自動）</button>
+          <button class="btn" id="btnPreview">プレビュー再生</button>
+          <button class="btn" id="btnStop">停止</button>
+          <button class="btn" id="btnFS">フルスクリーン</button>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <button class="btn danger" id="btnAbort">生成中止</button>
+          <a class="btn" id="dlLink" href="#" download="sanso.webm" style="display:none;">ダウンロード</a>
+        </div>
+
         <div class="hint" style="margin-top:10px">
-          速度が速い/遅いは「流れの速さ」を触れば即調整。録画はブラウザ差があるのでChrome推奨。
+          生成開始を押すと：最初から再生→同時にWebM書き出し→曲が終わると自動で停止→DLが出る。
         </div>
       </div>
 
-      <div class="hd">ログ（ここに原因が出る）</div>
+      <div class="hd">ログ</div>
       <div class="bd">
         <div class="log" id="log"></div>
       </div>
     </section>
 
     <section class="card">
-      <div class="hd">プレビュー（Canvas）</div>
+      <div class="hd">プレビュー（Canvas / 1920×1080固定）</div>
       <div class="bd">
         <div class="stage" id="stage">
           <canvas id="cv"></canvas>
