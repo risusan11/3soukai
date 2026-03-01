@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>三送会 動画生成（画像順番 + 音源同期 + シュール球体 + 書き出し）</title>
+  <title>三送会：画像順番 + 音源同期 + 書き出し（安全版）</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <header>
     <div class="title">
-      <div class="h1">三送会：画像→音源→同期→書き出し</div>
-      <div class="sub">最初60秒は0.9倍、以降1.0倍。曲の長さに合わせて速度を自動計算。</div>
+      <div class="h1">三送会：動画生成（安全版）</div>
+      <div class="sub">画像順番 → 音源 → 同期 → プレビュー → WebM書き出し。落ちない設計。</div>
     </div>
     <div class="pill" id="statusPill">READY</div>
   </header>
@@ -20,7 +20,7 @@
       <div class="hd">1) 画像（順番つき）</div>
       <div class="bd">
         <input id="imgInput" type="file" accept="image/*" multiple />
-        <div class="hint">サムネをドラッグして順番を決める。10〜40枚くらいが気持ちいい。</div>
+        <div class="hint">サムネをドラッグで順番変更。縁取りなし・一列で流す。</div>
         <div class="list" id="imgList"></div>
       </div>
 
@@ -33,7 +33,7 @@
             <div class="read" id="audLen">-</div>
           </div>
           <div class="field">
-            <label>ループ数（自動）</label>
+            <label>ループ数</label>
             <select id="loops">
               <option value="auto" selected>auto（おすすめ）</option>
               <option value="1">1</option>
@@ -43,7 +43,7 @@
             </select>
           </div>
         </div>
-        <div class="hint">autoは「曲が長いほど、同じ写真が何回も出すぎない」ようにループ数を選ぶ。</div>
+        <div class="hint">最初60秒は0.9倍速、以降1.0倍速。曲の長さから速度を自動計算。</div>
       </div>
 
       <div class="hd">3) 再生 / 書き出し</div>
@@ -63,13 +63,14 @@
 
         <div class="grid2" style="margin-top:10px">
           <div class="field">
-            <label>画面の流れ（強さ）</label>
-            <input id="flowStrength" type="range" min="0.6" max="1.4" step="0.01" value="1.0">
+            <label>流れの速さ（最終倍率）</label>
+            <input id="flowStrength" type="range" min="0.45" max="1.25" step="0.01" value="0.78" />
           </div>
           <div class="field">
             <label>飽き対策（強さ）</label>
-            <input id="spice" type="range" min="0" max="1" step="0.01" value="0.55">
+            <input id="spice" type="range" min="0" max="1" step="0.01" value="0.55" />
           </div>
+
           <div class="field">
             <label>画像の見せ方</label>
             <select id="fitMode">
@@ -87,8 +88,13 @@
         </div>
 
         <div class="hint" style="margin-top:10px">
-          書き出しはブラウザがWebMを生成。学校PCで再生が不安なら、あとでMP4に変換（VLC等）すると事故が減る。
+          速度が速い/遅いは「流れの速さ」を触れば即調整。録画はブラウザ差があるのでChrome推奨。
         </div>
+      </div>
+
+      <div class="hd">ログ（ここに原因が出る）</div>
+      <div class="bd">
+        <div class="log" id="log"></div>
       </div>
     </section>
 
@@ -110,6 +116,6 @@
     </section>
   </main>
 
-  <script type="module" src="./app.js"></script>
+  <script src="./app.js"></script>
 </body>
 </html>
