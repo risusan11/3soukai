@@ -47,7 +47,7 @@ header{
 
 .wrap{
   display:grid;
-  grid-template-columns: 460px 1fr;
+  grid-template-columns: 480px 1fr;
   gap:16px;
   padding:16px;
   align-items:start;
@@ -173,6 +173,7 @@ input[type="file"]{
   background: rgba(122,162,255,.08);
 }
 
+/* stage: canvasはレイアウトに影響させない */
 .stage{
   position:relative;
   aspect-ratio: 16/9;
@@ -182,17 +183,6 @@ input[type="file"]{
   border:1px solid rgba(255,255,255,.12);
   background:#000;
 }
-.stage{
-  position:relative;
-  aspect-ratio: 16/9;
-  width:100%;
-  border-radius: 18px;
-  overflow:hidden;
-  border:1px solid rgba(255,255,255,.12);
-  background:#000;
-}
-
-/* ✅ canvasは「親に貼り付け」。レイアウトに影響させない */
 canvas{
   position:absolute;
   inset:0;
@@ -244,7 +234,7 @@ canvas{
   border: 1px solid rgba(255,255,255,.12);
   border-radius: 14px;
   padding: 10px;
-  max-height: 160px;
+  max-height: 170px;
   overflow: auto;
   white-space: pre-wrap;
 }
