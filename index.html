@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>三送会：自動生成（画像順番＋音源同期）</title>
+  <title>三送会：一定速度 + 余韻6秒</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <header>
     <div class="title">
-      <div class="h1">三送会：自動生成（安定版）</div>
-      <div class="sub">画像→音源→「生成開始」→終わったらWebMをダウンロード。最初60秒0.9×、以降1.0×。</div>
+      <div class="h1">三送会：一定速度（最後6秒余韻）</div>
+      <div class="sub">スライドは曲が終わる6秒前に流れ終わって停止。最後の6秒は動かない。</div>
     </div>
     <div class="pill" id="statusPill">READY</div>
   </header>
@@ -20,7 +20,7 @@
       <div class="hd">1) 画像（順番つき）</div>
       <div class="bd">
         <input id="imgInput" type="file" accept="image/*" multiple />
-        <div class="hint">サムネをドラッグで順番変更。縁取りなし・一列で右→左に流れる。</div>
+        <div class="hint">サムネをドラッグで並び替え。縁取りなし。</div>
         <div class="list" id="imgList"></div>
       </div>
 
@@ -33,37 +33,9 @@
             <div class="read" id="audLen">-</div>
           </div>
           <div class="field">
-            <label>ループ数</label>
-            <select id="loops">
-              <option value="auto" selected>auto（おすすめ）</option>
-              <option value="1">1</option>
-              <option value="2">2</option>
-              <option value="3">3</option>
-              <option value="4">4</option>
-            </select>
+            <label>余韻</label>
+            <div class="read">6.0 秒固定</div>
           </div>
-
-          <div class="field">
-            <label>終わり前倒し（秒）</label>
-            <input id="endLead" type="range" min="0" max="6" step="0.1" value="1.6" />
-          </div>
-          <div class="field">
-            <label>流れの速さ（最終倍率）</label>
-            <input id="flowStrength" type="range" min="0.45" max="1.25" step="0.01" value="0.78" />
-          </div>
-
-          <div class="field">
-            <label>飽き対策（強さ）</label>
-            <input id="spice" type="range" min="0" max="1" step="0.01" value="0.55" />
-          </div>
-          <div class="field">
-            <label>球体（右下）</label>
-            <select id="orbOn">
-              <option value="on" selected>ON</option>
-              <option value="off">OFF</option>
-            </select>
-          </div>
-
           <div class="field">
             <label>画像の見せ方</label>
             <select id="fitMode">
@@ -72,30 +44,30 @@
             </select>
           </div>
           <div class="field">
-            <label>（描画）FPS</label>
-            <div class="read">30fps 固定</div>
+            <label>球体（右下）</label>
+            <select id="orbOn">
+              <option value="on" selected>ON</option>
+              <option value="off">OFF</option>
+            </select>
           </div>
         </div>
-
-        <div class="hint">前倒し=「曲が終わる少し前に、列がきれいに流れ切る」。おすすめは1.2〜2.0秒。</div>
       </div>
 
-      <div class="hd">3) 生成（ワンクリック）</div>
+      <div class="hd">3) 再生 / 生成</div>
       <div class="bd">
         <div class="row">
-          <button class="btn primary" id="btnGenerate">生成開始（自動）</button>
-          <button class="btn" id="btnPreview">プレビュー再生</button>
-          <button class="btn" id="btnStop">停止</button>
+          <button class="btn" id="btnPreview">プレビュー</button>
+          <button class="btn primary" id="btnGenerate">生成（WebM）</button>
+          <button class="btn danger" id="btnAbort">停止/中止</button>
           <button class="btn" id="btnFS">フルスクリーン</button>
         </div>
 
         <div class="row" style="margin-top:10px">
-          <button class="btn danger" id="btnAbort">生成中止</button>
           <a class="btn" id="dlLink" href="#" download="sanso.webm" style="display:none;">ダウンロード</a>
         </div>
 
         <div class="hint" style="margin-top:10px">
-          生成開始を押すと：最初から再生→同時にWebM書き出し→曲が終わると自動で停止→DLが出る。
+          生成は曲の長さぶん待つ（録画方式）。終端は自動で止まってDLが出る。
         </div>
       </div>
 
@@ -106,7 +78,7 @@
     </section>
 
     <section class="card">
-      <div class="hd">プレビュー（Canvas / 1920×1080固定）</div>
+      <div class="hd">プレビュー（1920×1080固定）</div>
       <div class="bd">
         <div class="stage" id="stage">
           <canvas id="cv"></canvas>
@@ -115,7 +87,7 @@
         <div class="hud">
           <div class="badge" id="badge">0.0s</div>
           <div class="bar"><div id="bar"></div></div>
-          <div class="badge" id="speedBadge">x0.90</div>
+          <div class="badge" id="stateBadge">IDLE</div>
         </div>
 
         <audio id="audio" controls style="width:100%; margin-top:10px;"></audio>
