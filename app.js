@@ -1,18 +1,18 @@
 "use strict";
 
 /**
- * 安全版ポイント
- * - 画面ログ：エラーの原因が必ず画面に出る
- * - 例外は全部catchして落ちない
- * - 速度計算は items 1セット幅のみ（爆速防止）
- * - MediaRecorder / captureStream / Audio 再生 ぜんぶガード
+ * A版（推奨）：リアルタイムだけど“ワンクリック自動生成”
+ * - offsetXは「音源時間から直接」算出 → 戻らない/逆走しない
+ * - endLead秒前に流れ切る（Tgで速度計算）
+ * - 30fps描画 / FFTは3フレに1回 / 描画枚数少なめ
+ * - 生成ボタンで：録画開始→最初から再生→終端で自動停止→DL表示
  */
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
 function logLine(msg){
   const t = new Date().toLocaleTimeString();
-  logEl.textContent = `[${t}] ${msg}\n` + logEl.textContent;
+  if (logEl) logEl.textContent = `[${t}] ${msg}\n` + logEl.textContent;
 }
 function safe(fn, label){
   try { return fn(); }
@@ -22,21 +22,22 @@ function safe(fn, label){
     return undefined;
   }
 }
-
-window.addEventListener("error", (e) => {
-  logLine(`❌ window.error: ${e.message} @${e.filename}:${e.lineno}`);
-});
-window.addEventListener("unhandledrejection", (e) => {
-  logLine(`❌ unhandledrejection: ${e.reason?.message || e.reason}`);
-});
+window.addEventListener("error", (e) => logLine(`❌ window.error: ${e.message} @${e.filename}:${e.lineno}`));
+window.addEventListener("unhandledrejection", (e) => logLine(`❌ unhandledrejection: ${e.reason?.message || e.reason}`));
 
 function must(id){
   const el = $(id);
   if (!el) throw new Error(`Element not found: #${id}`);
   return el;
 }
+const clamp = (v,a,b) => Math.max(a, Math.min(b,v));
+const fmtTime = (s) => {
+  if (!Number.isFinite(s)) return "-";
+  const m = Math.floor(s/60);
+  const ss = Math.floor(s%60).toString().padStart(2,"0");
+  return `${m}:${ss}`;
+};
 
-// --- elements (全部存在チェックする) ---
 const imgInput = must("imgInput");
 const audInput = must("audInput");
 const imgList  = must("imgList");
@@ -45,13 +46,12 @@ const audioEl  = must("audio");
 const audLenEl = must("audLen");
 const loopsEl  = must("loops");
 
-const btnPlay  = must("btnPlay");
-const btnPause = must("btnPause");
+const btnGenerate = must("btnGenerate");
+const btnPreview = must("btnPreview");
 const btnStop  = must("btnStop");
 const btnFS    = must("btnFS");
+const btnAbort = must("btnAbort");
 
-const btnRec   = must("btnRec");
-const btnRecStop = must("btnRecStop");
 const dlLink   = must("dlLink");
 
 const stage    = must("stage");
@@ -67,11 +67,12 @@ const flowStrengthEl = must("flowStrength");
 const spiceEl = must("spice");
 const fitModeEl = must("fitMode");
 const orbOnEl = must("orbOn");
+const endLeadEl = must("endLead");
 
-// --- state ---
 let items = []; // {id, name, url, img}
 let playing = false;
 let paused = false;
+
 let raf = 0;
 let lastTs = 0;
 
@@ -80,62 +81,52 @@ let analyser = null;
 let audioSrcNode = null;
 let freqData = null;
 
-let offsetX = 0;
-let baseCycleW = 0;  // items 1セットの幅
-let basePps = 40;    // px/sec
+let baseCycleW = 0;  // items 1セット幅（CSS px換算）
+let basePps = 40;    // px/sec（effectiveTime=1秒あたり）
 let loops = 1;
 let T = 0;
 
+// perf
+const TARGET_FPS = 30;
+let accum = 0;
+let energySmoothed = 0;
+let energyTick = 0;
+
+// orb
+let orb = { phase:0, spin:0, pop:0, cd:0 };
+
+// recorder
 let recorder = null;
 let recChunks = [];
+let generating = false;
 
-const clamp = (v,a,b) => Math.max(a, Math.min(b,v));
-const fmtTime = (s) => {
-  if (!Number.isFinite(s)) return "-";
-  const m = Math.floor(s/60);
-  const ss = Math.floor(s%60).toString().padStart(2,"0");
-  return `${m}:${ss}`;
-};
-function setStatus(text){ statusPill.textContent = text; }
-function revokeUrl(url){ try{ URL.revokeObjectURL(url); } catch {} }
-function clearDownloads(){
-  dlLink.style.display = "none";
-  dlLink.href = "#";
-}
-function currentMultiplier(t){
-  return (t < 60) ? 0.9 : 1.0;
-}
+function setStatus(s){ statusPill.textContent = s; }
+function revokeUrl(url){ try{ URL.revokeObjectURL(url); } catch{} }
+function clearDownloads(){ dlLink.style.display="none"; dlLink.href="#"; }
 function makeId(){
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
   return "id_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
 }
+function currentMultiplier(t){ return (t < 60) ? 0.9 : 1.0; }
 
-// --- canvas resize (NO LOOP / FIXED 16:9) ---
+// --- canvas fixed 1920x1080 ---
 let resizePending = false;
-
 function resizeCanvasSafe(){
   const r = stage.getBoundingClientRect();
   const cssW = Math.floor(r.width);
   const cssH = Math.floor(r.height);
   if (!Number.isFinite(cssW) || !Number.isFinite(cssH) || cssW <= 0 || cssH <= 0) return;
 
-  // 目的：見た目はCSSで100%フィット、内部解像度は「録画向け」に固定
-  // ここを変えるだけで 4K/フルHD切替できる
   const TARGET_W = 1920;
   const TARGET_H = 1080;
 
-  cv.width = TARGET_W;
-  cv.height = TARGET_H;
+  if (cv.width !== TARGET_W) cv.width = TARGET_W;
+  if (cv.height !== TARGET_H) cv.height = TARGET_H;
 
-  // CSSサイズに合わせて描画をスケール（座標系をCSSピクセル基準にする）
   const sx = TARGET_W / cssW;
   const sy = TARGET_H / cssH;
-  ctx.setTransform(sx, 0, 0, sy, 0, 0);
-
-  // ログ（うるさければ消してOK）
-  // logLine(`ℹ️ canvas fixed: css=${cssW}x${cssH} px=${TARGET_W}x${TARGET_H}`);
+  ctx.setTransform(sx,0,0,sy,0,0);
 }
-
 function requestResize(){
   if (resizePending) return;
   resizePending = true;
@@ -144,23 +135,17 @@ function requestResize(){
     safe(resizeCanvasSafe, "resizeCanvasSafe");
   });
 }
-
 const ro = new ResizeObserver(() => requestResize());
 ro.observe(stage);
 window.addEventListener("resize", requestResize);
 document.addEventListener("fullscreenchange", requestResize);
 requestResize();
 
-// --- audio error visible ---
+// --- audio error ---
 audioEl.addEventListener("error", () => {
   const code = audioEl.error?.code;
-  const map = {
-    1: "読み込み中止",
-    2: "ネットワークエラー",
-    3: "デコード失敗（形式非対応の可能性）",
-    4: "サポート外形式の可能性"
-  };
-  logLine(`❌ 音源エラー: ${map[code] || "不明"} (code=${code ?? "?"})`);
+  const map = {1:"読み込み中止",2:"ネットワークエラー",3:"デコード失敗(形式?)",4:"サポート外形式"};
+  logLine(`❌ 音源エラー: ${map[code]||"不明"} (code=${code ?? "?"})`);
 });
 
 // --- list UI ---
@@ -169,7 +154,7 @@ function renderList(){
   if (items.length === 0){
     const empty = document.createElement("div");
     empty.className = "hint";
-    empty.textContent = "画像がまだない。画像→音源→再生/書き出し。";
+    empty.textContent = "画像がまだない。画像→音源→生成開始。";
     imgList.appendChild(empty);
     return;
   }
@@ -214,7 +199,7 @@ function renderList(){
           rebuildAndSync();
           return;
         }
-      }, "list button"));
+      }, "list"));
     });
 
     row.addEventListener("dragstart", (e) => {
@@ -233,13 +218,12 @@ function renderList(){
       items.splice(to, 0, moved);
       renderList();
       rebuildAndSync();
-    }, "drop reorder"));
-
+    }, "drop"));
     imgList.appendChild(row);
   });
 }
 
-// --- image loading ---
+// --- image load ---
 function loadImage(url){
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -249,12 +233,10 @@ function loadImage(url){
     img.src = url;
   });
 }
-
 imgInput.addEventListener("change", () => safe(async () => {
   clearDownloads();
   const files = Array.from(imgInput.files || []);
   if (files.length === 0) return;
-
   for (const f of files){
     const url = URL.createObjectURL(f);
     const img = await loadImage(url);
@@ -264,25 +246,23 @@ imgInput.addEventListener("change", () => safe(async () => {
   logLine(`✅ 画像追加: ${files.length}枚 / 合計${items.length}枚`);
   renderList();
   rebuildAndSync();
-}, "imgInput change"));
+}, "imgInput"));
 
-// --- audio loading ---
+// --- audio load ---
 audInput.addEventListener("change", () => safe(() => {
   clearDownloads();
   const f = (audInput.files || [])[0];
   if (!f) return;
-
   const url = URL.createObjectURL(f);
   audioEl.src = url;
   audioEl.load();
-
   audioEl.onloadedmetadata = () => safe(() => {
     T = audioEl.duration || 0;
     audLenEl.textContent = `${fmtTime(T)}（${T.toFixed(2)}s）`;
     logLine(`✅ 音源読み込み: ${f.name} / ${T.toFixed(2)}s`);
     rebuildAndSync();
-  }, "onloadedmetadata");
-}, "audInput change"));
+  }, "metadata");
+}, "audInput"));
 
 // --- sync calc ---
 function pickLoopsAuto(durationSec){
@@ -292,12 +272,9 @@ function pickLoopsAuto(durationSec){
   if (durationSec < 240) return 3;
   return 4;
 }
-loopsEl.addEventListener("change", () => safe(rebuildAndSync, "rebuildAndSync"));
-fitModeEl.addEventListener("change", () => safe(rebuildAndSync, "rebuildAndSync"));
 
 function estimateCycleWidthForItems(){
   if (items.length === 0) return 0;
-
   const r = stage.getBoundingClientRect();
   const H = r.height;
   const imgH = H * 0.78;
@@ -315,38 +292,42 @@ function estimateCycleWidthForItems(){
 }
 
 function rebuildAndSync(){
-  offsetX = 0;
   baseCycleW = estimateCycleWidthForItems();
-
   const chosen = loopsEl.value === "auto" ? String(pickLoopsAuto(T)) : loopsEl.value;
   loops = Number(chosen) || 1;
 
   if (T > 0 && baseCycleW > 0){
-    const a = Math.min(60, T);
-    const b = Math.max(0, T - 60);
-    const effective = 0.9 * a + 1.0 * b;
+    const lead = Number(endLeadEl.value || 0) || 0;
+    const Tg = Math.max(0.5, T - lead);
+
+    const a = Math.min(60, Tg);
+    const b = Math.max(0, Tg - 60);
+    const effective = 0.9*a + 1.0*b;
 
     basePps = (baseCycleW * loops) / Math.max(0.001, effective);
 
-    // 爆速防止クランプ（画面幅に対する割合で縛る）
     const W = Math.max(1, stage.getBoundingClientRect().width);
-    const minPps = W * 0.0018; // 0.18%/s
-    const maxPps = W * 0.030;  // 3.0%/s
-    basePps = clamp(basePps, minPps, maxPps);
+    basePps = clamp(basePps, W*0.0016, W*0.028);
 
+    logLine(`✅ 同期: lead=${lead.toFixed(1)} Tg=${Tg.toFixed(2)} loops=${loops} basePps=${basePps.toFixed(2)} cycleW=${baseCycleW.toFixed(1)}`);
     setStatus("SYNCED");
-    logLine(`✅ 同期: loops=${loops} basePps=${basePps.toFixed(2)} baseCycleW=${baseCycleW.toFixed(1)}`);
-  } else if (items.length > 0){
+  } else if (items.length > 0) {
     setStatus("IMAGES OK");
   } else {
     setStatus("READY");
   }
 }
+["input","change"].forEach(ev => {
+  endLeadEl.addEventListener(ev, () => safe(rebuildAndSync, "sync"));
+  flowStrengthEl.addEventListener(ev, () => safe(rebuildAndSync, "sync"));
+  spiceEl.addEventListener(ev, () => {});
+  fitModeEl.addEventListener(ev, () => safe(rebuildAndSync, "sync"));
+  loopsEl.addEventListener(ev, () => safe(rebuildAndSync, "sync"));
+});
 
-// --- audio analysis (created lazily) ---
+// --- audio analysis ---
 async function ensureAudioAnalysis(){
   if (audioCtx) return;
-
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 1024;
@@ -356,10 +337,8 @@ async function ensureAudioAnalysis(){
   audioSrcNode = audioCtx.createMediaElementSource(audioEl);
   audioSrcNode.connect(analyser);
   analyser.connect(audioCtx.destination);
-
   logLine("✅ AudioContext ready");
 }
-
 function getEnergy(){
   if (!analyser || !freqData) return 0;
   analyser.getByteFrequencyData(freqData);
@@ -368,82 +347,97 @@ function getEnergy(){
   const end = Math.floor(n * 0.18);
   let sum = 0;
   for (let i=start;i<end;i++) sum += freqData[i];
-  const avg = sum / Math.max(1, (end-start));
-  return avg / 255;
+  return (sum / Math.max(1,(end-start))) / 255;
 }
 
-// --- render ---
-let orb = { phase:0, spin:0, pop:0, cd:0 };
+// --- draw helpers ---
+function effectiveTimeFromAudio(tAudio){
+  const t1 = Math.min(60, tAudio);
+  const t2 = Math.max(0, tAudio - 60);
+  return 0.9*t1 + 1.0*t2;
+}
 
-function draw(ts){
-  if (!playing) return;
+function drawFrame(ts){
+  if (!playing){ return; }
   if (!lastTs) lastTs = ts;
-  const dt = (ts - lastTs)/1000;
+  const dtRaw = (ts - lastTs)/1000;
   lastTs = ts;
 
-  if (!paused){
-    const t = (!audioEl.paused && Number.isFinite(audioEl.currentTime))
-      ? audioEl.currentTime
-      : (badge._t || 0) + dt;
+  accum += dtRaw;
+  if (accum < 1/TARGET_FPS){
+    raf = requestAnimationFrame(drawFrame);
+    return;
+  }
+  const dt = accum;
+  accum = 0;
 
-    badge._t = t;
+  const tAudio = (!audioEl.paused && Number.isFinite(audioEl.currentTime))
+    ? audioEl.currentTime
+    : (badge._t || 0) + dt;
+  badge._t = tAudio;
 
-    const mul = currentMultiplier(t);
-    const flowMul = Number(flowStrengthEl.value) || 1.0;
-    const spice = Number(spiceEl.value) || 0;
+  const mul = currentMultiplier(tAudio);
+  speedBadge.textContent = `x${mul.toFixed(2)}`;
 
-    const pps = basePps * mul * flowMul;
-    offsetX -= pps * dt;
+  // progress bar
+  if (T > 0) bar.style.width = `${(clamp(tAudio/T,0,1)*100).toFixed(2)}%`;
+  else bar.style.width = "0%";
+  badge.textContent = `${tAudio.toFixed(1)}s`;
 
-    if (baseCycleW > 0){
-      while (offsetX <= -baseCycleW) offsetX += baseCycleW;
+  // --- offsetXは「音源時間」から直接算出 → 戻らない
+  const flowMul = Number(flowStrengthEl.value) || 1.0;
+  const eff = effectiveTimeFromAudio(tAudio);
+  const dist = basePps * flowMul * eff;
+
+  const m = (baseCycleW > 0) ? (dist % baseCycleW) : 0;
+  const offsetX = -m; // left
+
+  // energy (3フレに1回)
+  let energy = 0;
+  const spice = Number(spiceEl.value) || 0;
+  if (audioCtx && !audioEl.paused){
+    energyTick = (energyTick + 1) % 3;
+    if (energyTick === 0){
+      energySmoothed = 0.7*energySmoothed + 0.3*getEnergy();
     }
-
-    badge.textContent = `${t.toFixed(1)}s`;
-    speedBadge.textContent = `x${mul.toFixed(2)}`;
-    if (T > 0) bar.style.width = `${(clamp(t/T,0,1)*100).toFixed(2)}%`;
-    else bar.style.width = "0%";
-
-    const energy = (audioCtx && !audioEl.paused) ? getEnergy() : 0;
-
-    const flash = spice * 0.06 * (energy ** 1.6);
-    ctx.fillStyle = `rgb(${Math.floor(7+flash*30)},${Math.floor(7+flash*18)},${Math.floor(11+flash*36)})`;
-    ctx.fillRect(0,0,cv.width,cv.height);
-
-    drawMarquee(t, spice);
-    if (orbOnEl.value === "on") drawOrb(t, dt, spice, energy);
-    drawVignette();
-
-    if (Math.random() < 0.01){
-      // resize/fitで幅が変わった時の自然補正
-      baseCycleW = estimateCycleWidthForItems();
-    }
+    energy = energySmoothed;
   }
 
-  raf = requestAnimationFrame(draw);
+  // background
+  const flash = spice * 0.06 * (energy ** 1.6);
+  ctx.fillStyle = `rgb(${Math.floor(7+flash*30)},${Math.floor(7+flash*18)},${Math.floor(11+flash*36)})`;
+  ctx.fillRect(0,0,cv.width,cv.height);
+
+  drawMarquee(tAudio, spice, offsetX);
+
+  if (orbOnEl.value === "on"){
+    drawOrb(tAudio, dt, spice, energy);
+  }
+  drawVignette();
+
+  raf = requestAnimationFrame(drawFrame);
 }
 
-function drawMarquee(t, spice){
+function drawMarquee(t, spice, offsetX){
   const r = stage.getBoundingClientRect();
   const W = r.width;
   const H = r.height;
-
   if (items.length === 0) return;
 
   const imgH = H * 0.78;
   const y = (H - imgH)/2;
 
   const gapBase = 34;
-  const gapPulse = spice * 8 * (0.5 - Math.abs(((t*0.15)%1)-0.5)*2);
+  const gapPulse = spice * 6 * (0.5 - Math.abs(((t*0.15)%1)-0.5)*2);
   const gap = gapBase + gapPulse;
 
-  const micro = 1 + spice * 0.02 * Math.sin(t*0.55) + spice * 0.012 * Math.sin(t*1.1+1.2);
-  const driftY = spice * 1.5 * Math.sin(t*0.35);
+  const micro = 1 + spice * 0.018 * Math.sin(t*0.55) + spice * 0.010 * Math.sin(t*1.1+1.2);
+  const driftY = spice * 1.2 * Math.sin(t*0.35);
 
   let x = offsetX;
   if (baseCycleW > 0 && x > 0) x -= baseCycleW;
 
-  const maxCycles = 4;
+  const maxCycles = 2;
   for (let c=0; c<maxCycles; c++){
     for (let i=0; i<items.length; i++){
       const it = items[i];
@@ -454,7 +448,7 @@ function drawMarquee(t, spice){
       let drawW = imgH * (iw/ih);
       if (fitModeEl.value === "cover") drawW *= 1.08;
 
-      if (x + drawW >= -200 && x <= W + 200){
+      if (x + drawW >= -120 && x <= W + 120){
         const local = 0.007 * Math.sin(t*0.6 + (i + c*items.length)*0.8) * spice;
         const z = (1 + local) * micro;
 
@@ -466,9 +460,9 @@ function drawMarquee(t, spice){
       }
 
       x += drawW + gap;
-      if (x > W + 400) break;
+      if (x > W + 120) break;
     }
-    if (x > W + 400) break;
+    if (x > W + 120) break;
   }
 }
 
@@ -477,7 +471,7 @@ function drawOrb(t, dt, spice, energy){
   const W = r.width;
   const H = r.height;
 
-  const size = Math.min(140, W*0.16);
+  const size = Math.min(120, W*0.14);
   const pad = 18;
   const cx = W - pad - size/2;
   const cy = H - pad - size/2;
@@ -490,24 +484,24 @@ function drawOrb(t, dt, spice, energy){
   if (peak){
     orb.pop = 1.0;
     orb.cd = 0.6;
-    orb.spin += 0.8;
+    orb.spin += 0.7;
   } else {
     orb.pop = Math.max(0, orb.pop - dt*2.4);
   }
 
-  const breathe = 1 + 0.03*Math.sin(orb.phase) + 0.015*Math.sin(orb.phase*0.7+2);
-  const popScale = 1 + orb.pop*0.08;
-  const rot = 0.25*Math.sin(orb.spin) + orb.pop*0.2;
+  const breathe = 1 + 0.03*Math.sin(orb.phase);
+  const popScale = 1 + orb.pop*0.07;
+  const rot = 0.20*Math.sin(orb.spin) + orb.pop*0.16;
 
   ctx.save();
   ctx.translate(cx, cy);
   ctx.rotate(rot);
   ctx.scale(breathe*popScale, (breathe*0.98)*popScale);
 
-  ctx.globalAlpha = 0.28;
+  ctx.globalAlpha = 0.24;
   ctx.fillStyle = "#000";
   ctx.beginPath();
-  ctx.ellipse(0, size*0.42, size*0.36, size*0.10, 0, 0, Math.PI*2);
+  ctx.ellipse(0, size*0.42, size*0.34, size*0.10, 0, 0, Math.PI*2);
   ctx.fill();
 
   const g = ctx.createRadialGradient(-size*0.18, -size*0.18, size*0.12, 0, 0, size*0.62);
@@ -515,13 +509,13 @@ function drawOrb(t, dt, spice, energy){
   g.addColorStop(0.35, "rgba(170,180,210,0.55)");
   g.addColorStop(1, "rgba(35,38,58,0.92)");
 
-  ctx.globalAlpha = 0.95;
+  ctx.globalAlpha = 0.92;
   ctx.fillStyle = g;
   ctx.beginPath();
   ctx.arc(0,0,size*0.40,0,Math.PI*2);
   ctx.fill();
 
-  ctx.globalAlpha = 0.22;
+  ctx.globalAlpha = 0.18;
   ctx.fillStyle = "#fff";
   ctx.beginPath();
   ctx.ellipse(-size*0.12, -size*0.15, size*0.13, size*0.08, -0.6, 0, Math.PI*2);
@@ -542,75 +536,13 @@ function drawVignette(){
   ctx.fillRect(0,0,cv.width,cv.height);
 }
 
-// --- controls ---
-btnPlay.addEventListener("click", () => safe(async () => {
-  if (items.length === 0){ alert("先に画像を追加して順番を決めて。"); return; }
-  if (!audioEl.src){ alert("次に音源をアップロードして。"); return; }
-
+// --- audio analysis setup ---
+async function prepareAudio(){
   await ensureAudioAnalysis();
   if (audioCtx.state === "suspended") await audioCtx.resume();
-
-  rebuildAndSync();
-
-  if (!playing){
-    playing = true;
-    paused = false;
-    lastTs = 0;
-    setStatus("PLAYING");
-    audioEl.currentTime = 0;
-
-    try{ await audioEl.play(); }
-    catch(e){
-      logLine(`❌ 再生失敗: ${e?.message || e}`);
-      alert("音源の再生に失敗。形式が合ってない可能性がある。ログ見て。");
-      setStatus("PLAY ERROR");
-      playing = false;
-      return;
-    }
-
-    raf = requestAnimationFrame(draw);
-  } else if (paused){
-    paused = false;
-    setStatus("PLAYING");
-    try{ await audioEl.play(); } catch(e){ logLine(`❌ resume失敗: ${e?.message || e}`); }
-  }
-}, "btnPlay"));
-
-btnPause.addEventListener("click", () => safe(async () => {
-  if (!playing) return;
-  paused = !paused;
-  setStatus(paused ? "PAUSED" : "PLAYING");
-  if (paused) audioEl.pause();
-  else {
-    await ensureAudioAnalysis();
-    if (audioCtx.state === "suspended") await audioCtx.resume();
-    try{ await audioEl.play(); } catch(e){ logLine(`❌ resume失敗: ${e?.message || e}`); }
-  }
-}, "btnPause"));
-
-btnStop.addEventListener("click", () => safe(stopAll, "btnStop"));
-
-function stopAll(){
-  playing = false;
-  paused = false;
-  cancelAnimationFrame(raf);
-  raf = 0;
-  lastTs = 0;
-  badge._t = 0;
-  bar.style.width = "0%";
-  audioEl.pause();
-  audioEl.currentTime = 0;
-  setStatus("STOPPED");
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0,0,cv.width,cv.height);
 }
 
-btnFS.addEventListener("click", () => safe(async () => {
-  if (!document.fullscreenElement) await stage.requestFullscreen?.();
-  else await document.exitFullscreen?.();
-}, "btnFS"));
-
-// --- recording (guards) ---
+// --- generate (record) ---
 function pickMimeType(){
   const candidates = [
     "video/webm;codecs=vp9,opus",
@@ -625,50 +557,39 @@ function pickMimeType(){
   return "";
 }
 
-btnRec.addEventListener("click", () => safe(async () => {
-  if (items.length === 0 || !audioEl.src){
-    alert("画像と音源を入れてから書き出しして。");
-    return;
-  }
+async function startGenerate(){
+  if (generating) return;
+  if (items.length === 0){ alert("先に画像を追加して順番を決めて。"); return; }
+  if (!audioEl.src){ alert("次に音源をアップロードして。"); return; }
+  if (typeof cv.captureStream !== "function"){ alert("この環境はcanvas.captureStream未対応。Chrome推奨。"); return; }
+  if (!window.MediaRecorder){ alert("この環境はMediaRecorder未対応。Chrome推奨。"); return; }
+
   clearDownloads();
-
-  if (typeof cv.captureStream !== "function"){
-    alert("この環境は canvas.captureStream 未対応。Chrome推奨。");
-    logLine("❌ captureStream unsupported");
-    return;
-  }
-  if (!window.MediaRecorder){
-    alert("この環境は MediaRecorder 未対応。Chrome推奨。");
-    logLine("❌ MediaRecorder unsupported");
-    return;
-  }
-
-  await ensureAudioAnalysis();
-  if (audioCtx.state === "suspended") await audioCtx.resume();
+  await prepareAudio();
 
   rebuildAndSync();
 
-  // ensure draw running
-  if (!playing){
-    playing = true;
-    paused = false;
-    lastTs = 0;
-    raf = requestAnimationFrame(draw);
-  }
+  // start drawing
+  playing = true;
+  paused = false;
+  lastTs = 0;
+  accum = 0;
+  badge._t = 0;
+  energySmoothed = 0;
+  energyTick = 0;
 
+  // audio start
   audioEl.currentTime = 0;
   try{ await audioEl.play(); }
   catch(e){
-    logLine(`❌ 録画前の再生失敗: ${e?.message || e}`);
-    alert("音源の再生に失敗。ログ見て。");
-    setStatus("REC ERROR");
+    logLine(`❌ 再生失敗: ${e?.message || e}`);
+    alert("音源の再生に失敗（形式/権限）。");
+    playing = false;
     return;
   }
 
-  setStatus("RECORDING");
-
-  const canvasStream = cv.captureStream(60);
-
+  // streams
+  const canvasStream = cv.captureStream(30);
   const dest = audioCtx.createMediaStreamDestination();
   try{ audioSrcNode.disconnect(); }catch{}
   audioSrcNode.connect(analyser);
@@ -684,8 +605,8 @@ btnRec.addEventListener("click", () => safe(async () => {
     recorder = new MediaRecorder(mixed, mimeType ? { mimeType } : undefined);
   }catch(e){
     logLine(`❌ MediaRecorder ctor失敗: ${e?.message || e}`);
-    alert("録画の作成に失敗。ログ見て。");
-    setStatus("REC ERROR");
+    alert("録画作成に失敗。Chrome推奨。");
+    playing = false;
     return;
   }
 
@@ -698,30 +619,102 @@ btnRec.addEventListener("click", () => safe(async () => {
     dlLink.href = url;
     dlLink.style.display = "inline-flex";
     dlLink.textContent = "ダウンロード（WebM）";
-    setStatus("REC DONE");
-    logLine("✅ 録画完了（WebM生成）");
+    setStatus("DONE");
+    logLine("✅ 生成完了（WebM）");
   }, "recorder.onstop");
 
-  recorder.start(250);
-  logLine(`✅ 録画開始 mime=${recorder.mimeType || "(default)"}`);
+  generating = true;
+  setStatus("GENERATING");
+  logLine(`✅ 生成開始 mime=${recorder.mimeType || "(default)"}`);
 
-audioEl.onended = () => {
+  recorder.start(300);
+
+  // stop at end
+  audioEl.onended = () => {
+    stopGenerateInternal(true);
+  };
+
+  raf = requestAnimationFrame(drawFrame);
+}
+
+function stopGenerateInternal(auto){
   if (recorder && recorder.state === "recording"){
     try{ recorder.requestData(); }catch{}
     recorder.stop();
   }
-  stopAll();
-};
-}, "btnRec"));
+  generating = false;
 
-btnRecStop.addEventListener("click", () => safe(() => {
-  if (recorder && recorder.state === "recording") recorder.stop();
-}, "btnRecStop"));
+  // stop playback
+  playing = false;
+  cancelAnimationFrame(raf);
+  raf = 0;
+  lastTs = 0;
+  accum = 0;
 
-audioEl.addEventListener("ended", () => safe(() => { if (playing) stopAll(); }, "audio ended"));
+  try{ audioEl.pause(); }catch{}
+  audioEl.currentTime = 0;
 
-// init
+  if (!auto) setStatus("STOPPED");
+}
+
+function abortGenerate(){
+  if (!generating){
+    stopPreview();
+    return;
+  }
+  stopGenerateInternal(false);
+}
+
+function stopPreview(){
+  playing = false;
+  cancelAnimationFrame(raf);
+  raf = 0;
+  lastTs = 0;
+  accum = 0;
+  try{ audioEl.pause(); }catch{}
+  audioEl.currentTime = 0;
+  setStatus("STOPPED");
+}
+
+// --- preview ---
+async function startPreview(){
+  if (items.length === 0){ alert("先に画像を追加して順番を決めて。"); return; }
+  if (!audioEl.src){ alert("次に音源をアップロードして。"); return; }
+
+  await prepareAudio();
+  rebuildAndSync();
+
+  playing = true;
+  paused = false;
+  lastTs = 0;
+  accum = 0;
+  badge._t = 0;
+
+  audioEl.currentTime = 0;
+  try{ await audioEl.play(); }
+  catch(e){
+    logLine(`❌ 再生失敗: ${e?.message || e}`);
+    alert("音源の再生に失敗。");
+    playing = false;
+    return;
+  }
+
+  setStatus("PREVIEW");
+  raf = requestAnimationFrame(drawFrame);
+}
+
+// --- controls ---
+btnGenerate.addEventListener("click", () => safe(startGenerate, "startGenerate"));
+btnPreview.addEventListener("click", () => safe(startPreview, "startPreview"));
+btnStop.addEventListener("click", () => safe(() => { generating=false; stopPreview(); }, "stop"));
+btnAbort.addEventListener("click", () => safe(abortGenerate, "abort"));
+btnFS.addEventListener("click", () => safe(async () => {
+  if (!document.fullscreenElement) await stage.requestFullscreen?.();
+  else await document.exitFullscreen?.();
+}, "fs"));
+
+// --- init ---
 setStatus("READY");
 renderList();
 rebuildAndSync();
-logLine("✅ 起動完了（安全版）");
+logLine("✅ 起動完了（自動生成版）");
